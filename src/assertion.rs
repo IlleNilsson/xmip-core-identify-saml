@@ -67,6 +67,27 @@ impl Assertion {
             span: (start, end),
         }))
     }
+
+    /// The first `AttributeValue` of the `Attribute` of this `Name`, in the
+    /// assertion this was scanned from; `xml` is that same document.
+    #[must_use]
+    pub fn attribute_value(&self, xml: &str, name: &str) -> Option<String> {
+        let body = xml.get(self.span.0..self.span.1)?;
+        let mut from = 0;
+        while let Some((start, name_end)) = find_element(body, "Attribute", from) {
+            let tag_end = body[name_end..].find('>')? + name_end;
+            let named = attribute(&body[name_end..tag_end], "Name")
+                .as_deref()
+                .map(unescape);
+            if named.as_deref() == Some(name) {
+                let closing = format!("</{}>", &body[start + 1..name_end]);
+                let end = body[tag_end..].find(&closing)? + tag_end;
+                return text_of(&body[tag_end..end], "AttributeValue");
+            }
+            from = tag_end;
+        }
+        None
+    }
 }
 
 /// The `NameID` text and its `Format`, from the first `NameID` in the body,
@@ -195,6 +216,27 @@ mod tests {
         assert_eq!(assertion.issuer, "idp");
         assert_eq!(assertion.name_id, "u");
         assert_eq!(assertion.format, None);
+    }
+
+    #[test]
+    fn an_attribute_is_read_by_its_name_and_not_by_the_one_beside_it() {
+        let xml = concat!(
+            "<saml:Assertion><saml:Issuer>idp</saml:Issuer>",
+            "<saml:Subject><saml:NameID>u</saml:NameID></saml:Subject>",
+            "<saml:AttributeStatement>",
+            r#"<saml:Attribute Name="urn:empty" NameFormat="urn:x"></saml:Attribute>"#,
+            r#"<saml:Attribute NameFormat="urn:x" Name="urn:role">"#,
+            "<saml:AttributeValue>buyer</saml:AttributeValue></saml:Attribute>",
+            "</saml:AttributeStatement></saml:Assertion>",
+        );
+        let assertion = Assertion::scan(xml).expect("read").expect("an assertion");
+
+        assert_eq!(
+            assertion.attribute_value(xml, "urn:role").as_deref(),
+            Some("buyer")
+        );
+        assert_eq!(assertion.attribute_value(xml, "urn:empty"), None);
+        assert_eq!(assertion.attribute_value(xml, "urn:absent"), None);
     }
 
     #[test]
