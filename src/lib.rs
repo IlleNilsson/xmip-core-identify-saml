@@ -27,8 +27,16 @@
 //! http.form.samlresponse   the SAMLResponse field, base64   the property, by default
 //! saml.issuer              the Issuer text                  evidence
 //! saml.name-id-format      the NameID Format attribute      evidence, where present
+//! principal.user           the NameID, or the UPN attribute evidence, where it is one
 //! saml.assertion           the assertion, base64            proof
 //! ```
+//!
+//! Principal evidence (ADR-0054): where the `NameID`'s format is
+//! `emailAddress`, `WindowsDomainQualifiedName` or unspecified and its text is
+//! a user principal name, or else where the assertion carries the UPN
+//! attribute [`UPN_ATTRIBUTE`] and that is one, it is written as
+//! `principal.user` in the capability's canonical form. The claim stays the
+//! `NameID`; a persistent or transient identifier is never read as a name.
 //!
 //! On the transport layer the proof is the base64 exactly as it was posted;
 //! on the message layer it is the `Assertion` element, encoded here, so the
@@ -39,7 +47,10 @@ pub mod assertion;
 use base64::Engine;
 use base64::alphabet;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
-use identify::{IdentifyError, MessageIdentifier, Presented, StreamArrival, TransportIdentifier};
+use identify::{
+    IdentifyError, MessageIdentifier, Presented, StreamArrival, TransportIdentifier,
+    UserPrincipalName, principal,
+};
 use message::Message;
 use xcore::{Arriving, Mechanism};
 
@@ -53,6 +64,17 @@ pub const ISSUER: &str = "saml.issuer";
 pub const NAME_ID_FORMAT: &str = "saml.name-id-format";
 /// The proof name the base64 assertion rides under.
 pub const ASSERTION_PROOF: &str = "saml.assertion";
+/// The `Name` of the attribute an identity provider carries a user principal
+/// name under.
+pub const UPN_ATTRIBUTE: &str = "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn";
+
+/// The `NameID` formats whose text may be a user principal name; a `NameID`
+/// with no format is unspecified (SAML Core 8.3.1).
+const NAMING_FORMATS: [&str; 3] = [
+    "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
+    "urn:oasis:names:tc:SAML:1.1:nameid-format:WindowsDomainQualifiedName",
+    "urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified",
+];
 
 /// Standard base64, padded or not: identity providers differ, and the
 /// binding does not say.
@@ -82,14 +104,36 @@ impl Saml {
         }
     }
 
-    fn present(&self, assertion: &Assertion, proof: String) -> Presented {
+    fn present(&self, assertion: &Assertion, xml: &str, proof: String) -> Presented {
         let mut claim = Presented::passed(TransportIdentifier::mechanism(self), &assertion.name_id)
             .with_evidence(ISSUER, &assertion.issuer);
         if let Some(format) = &assertion.format {
             claim = claim.with_evidence(NAME_ID_FORMAT, format);
         }
+        if let Some(name) = user_principal(assertion, xml) {
+            claim = claim.with_evidence(principal::USER, name.to_string());
+        }
         claim.with_proof(ASSERTION_PROOF, proof)
     }
+}
+
+/// The user principal name the assertion carries, where it carries one
+/// (ADR-0054): the `NameID` where its format may hold one, else the UPN
+/// attribute. `xml` is the document the assertion was scanned from.
+fn user_principal(assertion: &Assertion, xml: &str) -> Option<UserPrincipalName> {
+    let naming = assertion
+        .format
+        .as_deref()
+        .is_none_or(|format| NAMING_FORMATS.contains(&format.trim()));
+
+    naming
+        .then(|| UserPrincipalName::parse(&assertion.name_id))
+        .flatten()
+        .or_else(|| {
+            assertion
+                .attribute_value(xml, UPN_ATTRIBUTE)
+                .and_then(|text| UserPrincipalName::parse(&text))
+        })
 }
 
 impl TransportIdentifier for Saml {
@@ -115,7 +159,7 @@ impl TransportIdentifier for Saml {
         let Some(assertion) = Assertion::scan(&xml)? else {
             return Err(IdentifyError::new("the SAML response carries no Assertion"));
         };
-        Ok(Some(self.present(&assertion, posted.to_string())))
+        Ok(Some(self.present(&assertion, &xml, posted.to_string())))
     }
 }
 
@@ -139,7 +183,7 @@ impl MessageIdentifier for Saml {
             return Ok(None);
         };
         let proof = BASE64.encode(&xml[assertion.span.0..assertion.span.1]);
-        Ok(Some(self.present(&assertion, proof)))
+        Ok(Some(self.present(&assertion, xml, proof)))
     }
 }
 
@@ -212,6 +256,83 @@ mod tests {
             ]
         );
         assert_eq!(claim.proof(ASSERTION_PROOF), Some(properties[0].1.as_str()));
+    }
+
+    /// An assertion with this `NameID` element and these attribute statements.
+    fn presented(name_id: &str, statements: &str) -> Presented {
+        let xml = format!(
+            "<saml:Assertion><saml:Issuer>https://idp.example</saml:Issuer>\
+             <saml:Subject>{name_id}</saml:Subject>{statements}</saml:Assertion>"
+        );
+        let stream = stream();
+        let properties = posted(&xml);
+        let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/acs", &properties);
+
+        TransportIdentifier::identify(&Saml::posted(), &arrival)
+            .expect("read")
+            .expect("a claim")
+    }
+
+    fn upn_statement(text: &str) -> String {
+        format!(
+            "<saml:AttributeStatement><saml:Attribute Name=\"{UPN_ATTRIBUTE}\">\
+             <saml:AttributeValue>{text}</saml:AttributeValue></saml:Attribute>\
+             </saml:AttributeStatement>"
+        )
+    }
+
+    fn principals(claim: &Presented) -> Vec<(&str, &str)> {
+        claim
+            .evidence
+            .iter()
+            .filter(|(name, _)| name.starts_with("principal."))
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn a_name_id_that_is_a_principal_name_is_written_in_canonical_form() {
+        let claim = presented(
+            "<saml:NameID Format=\"urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress\">\
+             Jane@Partner-X.Example</saml:NameID>",
+            "",
+        );
+        assert_eq!(claim.value, "Jane@Partner-X.Example", "the value stands");
+        assert_eq!(
+            principals(&claim),
+            [(principal::USER, "Jane@partner-x.example")]
+        );
+
+        let claim = presented("<saml:NameID>PARTNERX\\jane</saml:NameID>", "");
+        assert_eq!(principals(&claim), [(principal::USER, "jane@partnerx")]);
+    }
+
+    #[test]
+    fn the_upn_attribute_names_the_user_where_the_name_id_does_not() {
+        let claim = presented(
+            "<saml:NameID Format=\"urn:oasis:names:tc:SAML:2.0:nameid-format:persistent\">\
+             opaque@Idp.Example</saml:NameID>",
+            &upn_statement("Jane@Partner-X.Example"),
+        );
+
+        assert_eq!(claim.value, "opaque@Idp.Example");
+        assert_eq!(
+            principals(&claim),
+            [(principal::USER, "Jane@partner-x.example")]
+        );
+    }
+
+    #[test]
+    fn text_that_is_not_a_principal_name_gains_no_principal_evidence() {
+        let persistent = presented(
+            "<saml:NameID Format=\"urn:oasis:names:tc:SAML:2.0:nameid-format:persistent\">\
+             opaque@idp.example</saml:NameID>",
+            "",
+        );
+        let bare = presented("<saml:NameID>jane</saml:NameID>", &upn_statement("jane"));
+
+        assert!(principals(&persistent).is_empty(), "a persistent id");
+        assert!(principals(&bare).is_empty(), "a bare user");
     }
 
     #[test]
