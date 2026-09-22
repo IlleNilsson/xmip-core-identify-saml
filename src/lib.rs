@@ -34,7 +34,7 @@
 //! Principal evidence (ADR-0054): where the `NameID`'s format is
 //! `emailAddress`, `WindowsDomainQualifiedName` or unspecified and its text is
 //! a user principal name, or else where the assertion carries the UPN
-//! attribute [`UPN_ATTRIBUTE`] and that is one, it is written as
+//! attribute [`identify::saml::UPN_ATTRIBUTE`] and that is one, it is written as
 //! `principal.user` in the capability's canonical form. The claim stays the
 //! `NameID`; a persistent or transient identifier is never read as a name.
 //!
@@ -45,11 +45,10 @@
 pub mod assertion;
 
 use base64::Engine;
-use base64::alphabet;
-use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+use base64::engine::general_purpose::STANDARD;
+use identify::saml::{self, ASSERTION_PROOF};
 use identify::{
-    IdentifyError, MessageIdentifier, Presented, StreamArrival, TransportIdentifier,
-    UserPrincipalName, principal,
+    IdentifyError, MessageIdentifier, Presented, StreamArrival, TransportIdentifier, principal,
 };
 use message::Message;
 use xcore::{Arriving, Mechanism};
@@ -62,27 +61,6 @@ pub const SAML_RESPONSE: &str = "http.form.samlresponse";
 pub const ISSUER: &str = "saml.issuer";
 /// The evidence name carrying the `NameID` format.
 pub const NAME_ID_FORMAT: &str = "saml.name-id-format";
-/// The proof name the base64 assertion rides under.
-pub const ASSERTION_PROOF: &str = "saml.assertion";
-/// The `Name` of the attribute an identity provider carries a user principal
-/// name under.
-pub const UPN_ATTRIBUTE: &str = "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn";
-
-/// The `NameID` formats whose text may be a user principal name; a `NameID`
-/// with no format is unspecified (SAML Core 8.3.1).
-const NAMING_FORMATS: [&str; 3] = [
-    "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
-    "urn:oasis:names:tc:SAML:1.1:nameid-format:WindowsDomainQualifiedName",
-    "urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified",
-];
-
-/// Standard base64, padded or not: identity providers differ, and the
-/// binding does not say.
-const BASE64: GeneralPurpose = GeneralPurpose::new(
-    &alphabet::STANDARD,
-    GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
-);
-
 /// Reads an assertion's subject, from a posted response or from the content.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Saml {
@@ -104,36 +82,28 @@ impl Saml {
         }
     }
 
-    fn present(&self, assertion: &Assertion, xml: &str, proof: String) -> Presented {
+    fn present(
+        &self,
+        assertion: &Assertion,
+        xml: &str,
+        proof: String,
+    ) -> Result<Presented, IdentifyError> {
         let mut claim = Presented::passed(TransportIdentifier::mechanism(self), &assertion.name_id)
             .with_evidence(ISSUER, &assertion.issuer);
         if let Some(format) = &assertion.format {
             claim = claim.with_evidence(NAME_ID_FORMAT, format);
         }
-        if let Some(name) = user_principal(assertion, xml) {
+        let upn = assertion.attribute_value(xml, saml::is_upn_attribute)?;
+        let name = saml::user_principal(
+            &assertion.name_id,
+            assertion.format.as_deref(),
+            upn.as_deref(),
+        );
+        if let Some(name) = name {
             claim = claim.with_evidence(principal::USER, name.to_string());
         }
-        claim.with_proof(ASSERTION_PROOF, proof)
+        Ok(claim.with_proof(ASSERTION_PROOF, proof))
     }
-}
-
-/// The user principal name the assertion carries, where it carries one
-/// (ADR-0054): the `NameID` where its format may hold one, else the UPN
-/// attribute. `xml` is the document the assertion was scanned from.
-fn user_principal(assertion: &Assertion, xml: &str) -> Option<UserPrincipalName> {
-    let naming = assertion
-        .format
-        .as_deref()
-        .is_none_or(|format| NAMING_FORMATS.contains(&format.trim()));
-
-    naming
-        .then(|| UserPrincipalName::parse(&assertion.name_id))
-        .flatten()
-        .or_else(|| {
-            assertion
-                .attribute_value(xml, UPN_ATTRIBUTE)
-                .and_then(|text| UserPrincipalName::parse(&text))
-        })
 }
 
 impl TransportIdentifier for Saml {
@@ -149,17 +119,14 @@ impl TransportIdentifier for Saml {
             return Ok(None);
         };
 
-        let stripped: String = posted.chars().filter(|c| !c.is_whitespace()).collect();
-        let bytes = BASE64
-            .decode(&stripped)
-            .map_err(|_| IdentifyError::new("the SAML response is not base64"))?;
+        let bytes = saml::decode(posted)?;
         let xml = String::from_utf8(bytes)
             .map_err(|_| IdentifyError::new("the SAML response is not UTF-8 XML"))?;
 
         let Some(assertion) = Assertion::scan(&xml)? else {
             return Err(IdentifyError::new("the SAML response carries no Assertion"));
         };
-        Ok(Some(self.present(&assertion, &xml, posted.to_string())))
+        self.present(&assertion, &xml, posted.to_string()).map(Some)
     }
 }
 
@@ -182,8 +149,8 @@ impl MessageIdentifier for Saml {
         let Some(assertion) = Assertion::scan(xml)? else {
             return Ok(None);
         };
-        let proof = BASE64.encode(&xml[assertion.span.0..assertion.span.1]);
-        Ok(Some(self.present(&assertion, xml, proof)))
+        let proof = STANDARD.encode(&xml[assertion.span.0..assertion.span.1]);
+        self.present(&assertion, xml, proof).map(Some)
     }
 }
 
@@ -214,7 +181,7 @@ mod tests {
     }
 
     fn posted(text: &str) -> Vec<(String, String)> {
-        vec![(SAML_RESPONSE.to_string(), BASE64.encode(text))]
+        vec![(SAML_RESPONSE.to_string(), STANDARD.encode(text))]
     }
 
     fn message(bytes: &[u8]) -> Message {
@@ -275,9 +242,10 @@ mod tests {
 
     fn upn_statement(text: &str) -> String {
         format!(
-            "<saml:AttributeStatement><saml:Attribute Name=\"{UPN_ATTRIBUTE}\">\
+            "<saml:AttributeStatement><saml:Attribute Name=\"{}\">\
              <saml:AttributeValue>{text}</saml:AttributeValue></saml:Attribute>\
-             </saml:AttributeStatement>"
+             </saml:AttributeStatement>",
+            saml::UPN_ATTRIBUTE
         )
     }
 
@@ -384,7 +352,7 @@ mod tests {
             "the mechanism decides the layer"
         );
         let proof = claim.proof(ASSERTION_PROOF).expect("proof");
-        let decoded = String::from_utf8(BASE64.decode(proof).expect("base64")).expect("text");
+        let decoded = String::from_utf8(STANDARD.decode(proof).expect("base64")).expect("text");
         assert!(decoded.starts_with("<saml:Assertion"));
         assert!(decoded.ends_with("</saml:Assertion>"));
     }

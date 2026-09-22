@@ -4,8 +4,8 @@
 //! An assertion is `<saml:Assertion>` with an `<saml:Issuer>` and, under
 //! `<saml:Subject>`, a `<saml:NameID>`. The scan finds elements by local name
 //! whatever the prefix, skips an `EncryptedAssertion` rather than mistaking
-//! it for one, and reads element text with the five predefined entities
-//! unescaped. It does not validate the document, and it does not need to: a
+//! it for one, and reads element text unescaped as every XML reader in the
+//! estate unescapes it, by `xmip-core-codec`. It does not validate the document, and it does not need to: a
 //! document that passes the second gate's signature check is well-formed, and
 //! one that fails it is refused there whatever this read.
 
@@ -55,9 +55,9 @@ impl Assertion {
         };
         let body = &xml[start..end];
 
-        let issuer = text_of(body, "Issuer")
+        let issuer = text_of(body, "Issuer")?
             .ok_or_else(|| IdentifyError::new("the SAML assertion names no Issuer"))?;
-        let (name_id, format) = name_id(body)
+        let (name_id, format) = name_id(body)?
             .ok_or_else(|| IdentifyError::new("the SAML assertion names no subject: no NameID"))?;
 
         Ok(Some(Self {
@@ -68,56 +68,85 @@ impl Assertion {
         }))
     }
 
-    /// The first `AttributeValue` of the `Attribute` of this `Name`, in the
-    /// assertion this was scanned from; `xml` is that same document.
-    #[must_use]
-    pub fn attribute_value(&self, xml: &str, name: &str) -> Option<String> {
-        let body = xml.get(self.span.0..self.span.1)?;
+    /// The first `AttributeValue` of the first `Attribute` whose `Name`
+    /// `named` accepts, in the assertion this was scanned from; `xml` is that
+    /// same document.
+    ///
+    /// # Errors
+    ///
+    /// A name or value holds an entity XML does not define.
+    pub fn attribute_value(
+        &self,
+        xml: &str,
+        named: impl Fn(&str) -> bool,
+    ) -> Result<Option<String>, IdentifyError> {
+        let Some(body) = xml.get(self.span.0..self.span.1) else {
+            return Ok(None);
+        };
         let mut from = 0;
         while let Some((start, name_end)) = find_element(body, "Attribute", from) {
-            let tag_end = body[name_end..].find('>')? + name_end;
-            let named = attribute(&body[name_end..tag_end], "Name")
+            let Some(tag_end) = body[name_end..].find('>').map(|at| at + name_end) else {
+                return Ok(None);
+            };
+            let name = attribute(&body[name_end..tag_end], "Name")
                 .as_deref()
-                .map(unescape);
-            if named.as_deref() == Some(name) {
+                .map(codec::xml::unescape)
+                .transpose()?;
+            if name.as_deref().is_some_and(&named) {
                 let closing = format!("</{}>", &body[start + 1..name_end]);
-                let end = body[tag_end..].find(&closing)? + tag_end;
+                let Some(end) = body[tag_end..].find(&closing).map(|at| at + tag_end) else {
+                    return Ok(None);
+                };
                 return text_of(&body[tag_end..end], "AttributeValue");
             }
             from = tag_end;
         }
-        None
+        Ok(None)
     }
 }
 
 /// The `NameID` text and its `Format`, from the first `NameID` in the body,
 /// which is the Subject's: a `SubjectConfirmation` may carry another and it
 /// comes after.
-fn name_id(body: &str) -> Option<(String, Option<String>)> {
-    let (_, name_end) = find_element(body, "NameID", 0)?;
-    let tag_end = body[name_end..].find('>')? + name_end;
+fn name_id(body: &str) -> Result<Option<(String, Option<String>)>, IdentifyError> {
+    let Some((_, name_end)) = find_element(body, "NameID", 0) else {
+        return Ok(None);
+    };
+    let Some(tag_end) = body[name_end..].find('>').map(|at| at + name_end) else {
+        return Ok(None);
+    };
     let attributes = &body[name_end..tag_end];
-    let format = attribute(attributes, "Format").as_deref().map(unescape);
-    let text = element_text(body, name_end)?;
-    Some((text, format))
+    let format = attribute(attributes, "Format")
+        .as_deref()
+        .map(codec::xml::unescape)
+        .transpose()?;
+    Ok(element_text(body, name_end)?.map(|text| (text, format)))
 }
 
-fn text_of(body: &str, local_name: &str) -> Option<String> {
-    let (_, name_end) = find_element(body, local_name, 0)?;
-    element_text(body, name_end)
+fn text_of(body: &str, local_name: &str) -> Result<Option<String>, IdentifyError> {
+    match find_element(body, local_name, 0) {
+        Some((_, name_end)) => element_text(body, name_end),
+        None => Ok(None),
+    }
 }
 
 /// The text between the start tag's `>` and the next `<`, trimmed and
 /// unescaped. An empty element (`<x/>`) has none.
-fn element_text(body: &str, name_end: usize) -> Option<String> {
-    let tag_end = body[name_end..].find('>')? + name_end;
+fn element_text(body: &str, name_end: usize) -> Result<Option<String>, IdentifyError> {
+    let Some(tag_end) = body[name_end..].find('>').map(|at| at + name_end) else {
+        return Ok(None);
+    };
     if body[..tag_end].ends_with('/') {
-        return None;
+        return Ok(None);
     }
     let content = &body[tag_end + 1..];
-    let text = &content[..content.find('<')?];
-    let text = text.trim();
-    (!text.is_empty()).then(|| unescape(text))
+    let Some(close) = content.find('<') else {
+        return Ok(None);
+    };
+    let text = content[..close].trim();
+    Ok((!text.is_empty())
+        .then(|| codec::xml::unescape(text))
+        .transpose()?)
 }
 
 /// The start of the first element whose local name is `local_name`, at or
@@ -161,14 +190,6 @@ fn attribute(attributes: &str, name: &str) -> Option<String> {
         rest = &rest[at + name.len()..];
     }
     None
-}
-
-fn unescape(text: &str) -> String {
-    text.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&")
 }
 
 #[cfg(test)]
@@ -232,11 +253,19 @@ mod tests {
         let assertion = Assertion::scan(xml).expect("read").expect("an assertion");
 
         assert_eq!(
-            assertion.attribute_value(xml, "urn:role").as_deref(),
+            assertion
+                .attribute_value(xml, |name| name == "urn:role")
+                .expect("read")
+                .as_deref(),
             Some("buyer")
         );
-        assert_eq!(assertion.attribute_value(xml, "urn:empty"), None);
-        assert_eq!(assertion.attribute_value(xml, "urn:absent"), None);
+        let value = |wanted: &str| {
+            assertion
+                .attribute_value(xml, |name| name == wanted)
+                .expect("read")
+        };
+        assert_eq!(value("urn:empty"), None);
+        assert_eq!(value("urn:absent"), None);
     }
 
     #[test]

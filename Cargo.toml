@@ -20,6 +20,8 @@ path = "src/lib.rs"
 identify = { package = "xmip-core-identify", git = "https://github.com/IlleNilsson/xmip-core-identify", branch = "main" }
 xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core", branch = "main" }
 message = { package = "xmip-core-message", git = "https://github.com/IlleNilsson/xmip-core-message", branch = "main" }
+# XML character data, unescaped as every reader in the estate does.
+codec = { package = "xmip-core-codec", git = "https://github.com/IlleNilsson/xmip-core-codec", branch = "main" }
 # The POST binding carries the response as standard base64 (SAML Bindings
 # 3.5.4); the estate's base64 crate.
 base64 = "0.22"
