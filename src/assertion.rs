@@ -5,7 +5,7 @@
 //! `<saml:Subject>`, a `<saml:NameID>`. The scan finds elements by local name
 //! whatever the prefix, skips an `EncryptedAssertion` rather than mistaking
 //! it for one, and reads element text unescaped as every XML reader in the
-//! estate unescapes it, by `xmip-core-codec`. It does not validate the document, and it does not need to: a
+//! estate unescapes it, by `xmip-core-library-codec`. It does not validate the document, and it does not need to: a
 //! document that passes the second gate's signature check is well-formed, and
 //! one that fails it is refused there whatever this read.
 
