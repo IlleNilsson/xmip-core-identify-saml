@@ -43,6 +43,7 @@
 //! second gate reads one shape. Only a pushed arrival carries a passed claim.
 
 pub mod assertion;
+use context::property::HTTP_FORM_SAML_RESPONSE;
 use identify::evidence;
 use identify::saml;
 use identify::{IdentifyError, MessageIdentifier, Presented, StreamArrival, TransportIdentifier};
@@ -51,8 +52,6 @@ use xcore::{Arriving, Mechanism};
 
 pub use assertion::Assertion;
 
-/// The property read by default: the posted `SAMLResponse` form field.
-pub const SAML_RESPONSE: &str = "http.form.samlresponse";
 /// The evidence name carrying the issuer.
 pub const ISSUER: &str = "saml.issuer";
 /// The evidence name carrying the `NameID` format.
@@ -67,7 +66,7 @@ impl Saml {
     /// The response in the `SAMLResponse` form field the transport promoted.
     #[must_use]
     pub fn posted() -> Self {
-        Self::in_property(SAML_RESPONSE)
+        Self::in_property(HTTP_FORM_SAML_RESPONSE)
     }
 
     /// The base64 response or assertion in a named property.
@@ -178,7 +177,7 @@ mod tests {
 
     fn posted(text: &str) -> Vec<(String, String)> {
         vec![(
-            SAML_RESPONSE.to_string(),
+            HTTP_FORM_SAML_RESPONSE.to_string(),
             codec::base64::encode(text.as_bytes()),
         )]
     }
@@ -323,7 +322,10 @@ mod tests {
     #[test]
     fn a_response_that_is_not_base64_is_an_error_naming_why() {
         let stream = stream();
-        let properties = [(SAML_RESPONSE.to_string(), "<not base64>".to_string())];
+        let properties = [(
+            HTTP_FORM_SAML_RESPONSE.to_string(),
+            "<not base64>".to_string(),
+        )];
         let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/acs", &properties);
 
         let failure =
