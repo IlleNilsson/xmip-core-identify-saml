@@ -43,13 +43,9 @@
 //! second gate reads one shape. Only a pushed arrival carries a passed claim.
 
 pub mod assertion;
-
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
-use identify::saml::{self, ASSERTION_PROOF};
-use identify::{
-    IdentifyError, MessageIdentifier, Presented, StreamArrival, TransportIdentifier, principal,
-};
+use identify::evidence;
+use identify::saml;
+use identify::{IdentifyError, MessageIdentifier, Presented, StreamArrival, TransportIdentifier};
 use message::Message;
 use xcore::{Arriving, Mechanism};
 
@@ -100,9 +96,9 @@ impl Saml {
             upn.as_deref(),
         );
         if let Some(name) = name {
-            claim = claim.with_evidence(principal::USER, name.to_string());
+            claim = claim.with_evidence(evidence::PRINCIPAL_USER, name.to_string());
         }
-        Ok(claim.with_proof(ASSERTION_PROOF, proof))
+        Ok(claim.with_proof(evidence::SAML_ASSERTION, proof))
     }
 }
 
@@ -149,7 +145,7 @@ impl MessageIdentifier for Saml {
         let Some(assertion) = Assertion::scan(xml)? else {
             return Ok(None);
         };
-        let proof = STANDARD.encode(&xml[assertion.span.0..assertion.span.1]);
+        let proof = codec::base64::encode(&xml.as_bytes()[assertion.span.0..assertion.span.1]);
         self.present(&assertion, xml, proof).map(Some)
     }
 }
@@ -181,7 +177,10 @@ mod tests {
     }
 
     fn posted(text: &str) -> Vec<(String, String)> {
-        vec![(SAML_RESPONSE.to_string(), STANDARD.encode(text))]
+        vec![(
+            SAML_RESPONSE.to_string(),
+            codec::base64::encode(text.as_bytes()),
+        )]
     }
 
     fn message(bytes: &[u8]) -> Message {
@@ -222,7 +221,10 @@ mod tests {
                 ),
             ]
         );
-        assert_eq!(claim.proof(ASSERTION_PROOF), Some(properties[0].1.as_str()));
+        assert_eq!(
+            claim.proof(evidence::SAML_ASSERTION),
+            Some(properties[0].1.as_str())
+        );
     }
 
     /// An assertion with this `NameID` element and these attribute statements.
@@ -268,11 +270,14 @@ mod tests {
         assert_eq!(claim.value, "Jane@Partner-X.Example", "the value stands");
         assert_eq!(
             principals(&claim),
-            [(principal::USER, "Jane@partner-x.example")]
+            [(evidence::PRINCIPAL_USER, "Jane@partner-x.example")]
         );
 
         let claim = presented("<saml:NameID>PARTNERX\\jane</saml:NameID>", "");
-        assert_eq!(principals(&claim), [(principal::USER, "jane@partnerx")]);
+        assert_eq!(
+            principals(&claim),
+            [(evidence::PRINCIPAL_USER, "jane@partnerx")]
+        );
     }
 
     #[test]
@@ -286,7 +291,7 @@ mod tests {
         assert_eq!(claim.value, "opaque@Idp.Example");
         assert_eq!(
             principals(&claim),
-            [(principal::USER, "Jane@partner-x.example")]
+            [(evidence::PRINCIPAL_USER, "Jane@partner-x.example")]
         );
     }
 
@@ -351,8 +356,9 @@ mod tests {
             Layer::Transport,
             "the mechanism decides the layer"
         );
-        let proof = claim.proof(ASSERTION_PROOF).expect("proof");
-        let decoded = String::from_utf8(STANDARD.decode(proof).expect("base64")).expect("text");
+        let proof = claim.proof(evidence::SAML_ASSERTION).expect("proof");
+        let decoded =
+            String::from_utf8(codec::base64::decode(proof).expect("base64")).expect("text");
         assert!(decoded.starts_with("<saml:Assertion"));
         assert!(decoded.ends_with("</saml:Assertion>"));
     }

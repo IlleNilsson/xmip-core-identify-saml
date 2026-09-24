@@ -22,9 +22,6 @@ xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core
 message = { package = "xmip-core-message", git = "https://github.com/IlleNilsson/xmip-core-message", branch = "main" }
 # XML character data, unescaped as every reader in the estate does.
 codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNilsson/xmip-core-library-codec", branch = "main" }
-# The POST binding carries the response as standard base64 (SAML Bindings
-# 3.5.4); the estate's base64 crate.
-base64 = "0.22"
 
 [dev-dependencies]
 # The context and Stream a Message is built over, for the tests only.
