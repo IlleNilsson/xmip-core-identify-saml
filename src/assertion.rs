@@ -204,7 +204,7 @@ mod tests {
     <saml:Subject>
       <saml:NameID
         Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">
-        jane&amp;co@partner-x.example
+        jane&amp;co@party-x.example
       </saml:NameID>
       <saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer"/>
     </saml:Subject>
@@ -218,7 +218,7 @@ mod tests {
             .expect("an assertion");
 
         assert_eq!(assertion.issuer, "https://idp.example/metadata");
-        assert_eq!(assertion.name_id, "jane&co@partner-x.example");
+        assert_eq!(assertion.name_id, "jane&co@party-x.example");
         assert_eq!(
             assertion.format.as_deref(),
             Some("urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress")

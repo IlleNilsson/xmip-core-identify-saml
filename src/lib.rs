@@ -165,7 +165,7 @@ mod tests {
         "<saml:Issuer>https://idp.example</saml:Issuer>",
         "<saml:Subject>",
         r#"<saml:NameID Format="urn:oasis:names:tc:SAML:2.0:nameid-format:persistent">"#,
-        "partner-x</saml:NameID>",
+        "party-x</saml:NameID>",
         "</saml:Subject>",
         "</saml:Assertion>",
         "</samlp:Response>"
@@ -206,7 +206,7 @@ mod tests {
             .expect("read")
             .expect("a claim");
 
-        assert_eq!(claim.value, "partner-x");
+        assert_eq!(claim.value, "party-x");
         assert_eq!(claim.established, Established::Passed);
         assert_eq!(claim.layer(), Layer::Transport);
         assert_eq!(claim.mechanism.name(), "saml");
@@ -263,19 +263,19 @@ mod tests {
     fn a_name_id_that_is_a_principal_name_is_written_in_canonical_form() {
         let claim = presented(
             "<saml:NameID Format=\"urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress\">\
-             Jane@Partner-X.Example</saml:NameID>",
+             Jane@Party-X.Example</saml:NameID>",
             "",
         );
-        assert_eq!(claim.value, "Jane@Partner-X.Example", "the value stands");
+        assert_eq!(claim.value, "Jane@Party-X.Example", "the value stands");
         assert_eq!(
             principals(&claim),
-            [(evidence::PRINCIPAL_USER, "Jane@partner-x.example")]
+            [(evidence::PRINCIPAL_USER, "Jane@party-x.example")]
         );
 
-        let claim = presented("<saml:NameID>PARTNERX\\jane</saml:NameID>", "");
+        let claim = presented("<saml:NameID>PARTYX\\jane</saml:NameID>", "");
         assert_eq!(
             principals(&claim),
-            [(evidence::PRINCIPAL_USER, "jane@partnerx")]
+            [(evidence::PRINCIPAL_USER, "jane@partyx")]
         );
     }
 
@@ -284,13 +284,13 @@ mod tests {
         let claim = presented(
             "<saml:NameID Format=\"urn:oasis:names:tc:SAML:2.0:nameid-format:persistent\">\
              opaque@Idp.Example</saml:NameID>",
-            &upn_statement("Jane@Partner-X.Example"),
+            &upn_statement("Jane@Party-X.Example"),
         );
 
         assert_eq!(claim.value, "opaque@Idp.Example");
         assert_eq!(
             principals(&claim),
-            [(evidence::PRINCIPAL_USER, "Jane@partner-x.example")]
+            [(evidence::PRINCIPAL_USER, "Jane@party-x.example")]
         );
     }
 
@@ -352,7 +352,7 @@ mod tests {
             .expect("read")
             .expect("a claim");
 
-        assert_eq!(claim.value, "partner-x");
+        assert_eq!(claim.value, "party-x");
         assert_eq!(
             claim.layer(),
             Layer::Transport,
