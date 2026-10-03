@@ -171,10 +171,6 @@ mod tests {
         "</samlp:Response>"
     );
 
-    fn stream() -> Stream {
-        Stream::new(StreamId::new(1), b"".to_vec(), None)
-    }
-
     fn posted(text: &str) -> Vec<(String, String)> {
         vec![(
             HTTP_FORM_SAML_RESPONSE.to_string(),
@@ -198,9 +194,8 @@ mod tests {
 
     #[test]
     fn a_posted_response_is_presented_by_its_name_id_with_the_issuer_beside() {
-        let stream = stream();
         let properties = posted(RESPONSE);
-        let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/acs", &properties);
+        let arrival = StreamArrival::new(Arriving::Pushed, "https://x/acs", &properties);
 
         let claim = TransportIdentifier::identify(&Saml::posted(), &arrival)
             .expect("read")
@@ -232,9 +227,8 @@ mod tests {
             "<saml:Assertion><saml:Issuer>https://idp.example</saml:Issuer>\
              <saml:Subject>{name_id}</saml:Subject>{statements}</saml:Assertion>"
         );
-        let stream = stream();
         let properties = posted(&xml);
-        let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/acs", &properties);
+        let arrival = StreamArrival::new(Arriving::Pushed, "https://x/acs", &properties);
 
         TransportIdentifier::identify(&Saml::posted(), &arrival)
             .expect("read")
@@ -309,8 +303,7 @@ mod tests {
 
     #[test]
     fn an_arrival_without_a_posted_response_presents_nothing() {
-        let stream = stream();
-        let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/acs", &[]);
+        let arrival = StreamArrival::new(Arriving::Pushed, "https://x/acs", &[]);
 
         assert!(
             TransportIdentifier::identify(&Saml::posted(), &arrival)
@@ -321,12 +314,11 @@ mod tests {
 
     #[test]
     fn a_response_that_is_not_base64_is_an_error_naming_why() {
-        let stream = stream();
         let properties = [(
             HTTP_FORM_SAML_RESPONSE.to_string(),
             "<not base64>".to_string(),
         )];
-        let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/acs", &properties);
+        let arrival = StreamArrival::new(Arriving::Pushed, "https://x/acs", &properties);
 
         let failure =
             TransportIdentifier::identify(&Saml::posted(), &arrival).expect_err("not base64");
@@ -336,9 +328,8 @@ mod tests {
 
     #[test]
     fn a_response_without_an_assertion_is_an_error_and_not_an_absence() {
-        let stream = stream();
         let properties = posted("<samlp:Response><samlp:Status/></samlp:Response>");
-        let arrival = StreamArrival::new(&stream, Arriving::Pushed, "https://x/acs", &properties);
+        let arrival = StreamArrival::new(Arriving::Pushed, "https://x/acs", &properties);
 
         let failure =
             TransportIdentifier::identify(&Saml::posted(), &arrival).expect_err("no assertion");
@@ -381,10 +372,8 @@ mod tests {
 
     #[test]
     fn a_scheduled_pickup_presents_nothing_because_nobody_posted_anything() {
-        let stream = stream();
         let properties = posted(RESPONSE);
-        let arrival =
-            StreamArrival::new(&stream, Arriving::Scheduled, "https://idp/out", &properties);
+        let arrival = StreamArrival::new(Arriving::Scheduled, "https://idp/out", &properties);
 
         assert!(
             TransportIdentifier::identify(&Saml::posted(), &arrival)
