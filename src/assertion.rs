@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn an_encrypted_assertion_is_recognised_and_refused_by_name() {
+    fn an_encrypted_assertion_is_recognized_and_refused_by_name() {
         let xml =
             "<samlp:Response><saml:EncryptedAssertion>x</saml:EncryptedAssertion></samlp:Response>";
 

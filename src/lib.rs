@@ -11,7 +11,7 @@
 //! assertion itself rides as proof for `authenticate/saml` to check the
 //! signature and conditions against the `IdP` metadata. Nothing here checks
 //! them; an assertion signed by nobody is presented exactly as one signed
-//! by the right `IdP`. An `EncryptedAssertion` is recognised and refused: the
+//! by the right `IdP`. An `EncryptedAssertion` is recognized and refused: the
 //! names are not readable and saying so is different from seeing nothing.
 //!
 //! The mechanism travels on both layers (ADR-0050 section 3). On the
