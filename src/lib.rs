@@ -134,7 +134,7 @@ impl MessageIdentifier for Saml {
         let Some(section) = message.sections().first() else {
             return Ok(None);
         };
-        let Ok(xml) = section.stream.text() else {
+        let Some(xml) = identify::text(&section.stream)? else {
             return Ok(None);
         };
         if !xml.contains("Assertion") {
