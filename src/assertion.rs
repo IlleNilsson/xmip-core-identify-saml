@@ -1,22 +1,28 @@
-//! The two names a SAML 2.0 assertion carries in the clear, read with a scan
-//! and not a parser.
+//! The two names a SAML 2.0 assertion carries in the clear, read in one
+//! pass through the estate's one XML reader.
 //!
 //! An assertion is `<saml:Assertion>` with an `<saml:Issuer>` and, under
-//! `<saml:Subject>`, a `<saml:NameID>`. The scan finds elements by local name
-//! whatever the prefix, skips an `EncryptedAssertion` rather than mistaking
-//! it for one, and reads element text unescaped as every XML reader in the
-//! estate unescapes it, by `xmip-core-library-codec`.
+//! `<saml:Subject>`, a `<saml:NameID>`. The document is read a piece at a
+//! time by `codec::xml::Reader` — the reader under the tree the second gate
+//! reads the verified assertion with — so both gates read one text the same
+//! way: entities, line ends and an attribute's white space as XML reads
+//! them. No tree is built: what is read is kept as it passes, and reading
+//! stops where the assertion ends. The assertion is the first element named
+//! `Assertion` whatever its prefix; an `EncryptedAssertion` is recognized
+//! and refused rather than mistaken for one. Until 2026-11-13 this file
+//! scanned the text itself.
 //!
-//! **Where the schema puts them, and nowhere else.** The scan follows the
-//! nesting: the `Issuer`, `Subject` and `AttributeStatement` it reads are the
-//! assertion's own children, the `NameID` the `Subject`'s, an `Attribute`
-//! the statement's and its value the attribute's — the same children the
-//! second gate reads from the verified assertion. A `Subject` planted inside
-//! the assertion's `Signature`, or anywhere deeper, is not the one read
-//! here, so the claim this presents is the one the signature covers. It does
-//! not validate the document, and it does not need to: one that fails the
-//! second gate's signature check is refused there whatever this read.
+//! **Where the schema puts them, and nowhere else.** The `Issuer`, `Subject`
+//! and `AttributeStatement` read are the assertion's own children, the
+//! `NameID` the `Subject`'s, an `Attribute` the statement's and its value
+//! the attribute's — the same children the second gate reads from the
+//! verified assertion. A `Subject` planted inside the assertion's
+//! `Signature`, or anywhere deeper, is not the one read here, so the claim
+//! this presents is the one the signature covers. It does not validate the
+//! document, and it does not need to: one that fails the second gate's
+//! signature check is refused there whatever this read.
 
+use codec::xml::{Event, Malformed, Reader, Tag};
 use identify::IdentifyError;
 
 /// What the first gate reads out of an assertion.
@@ -30,31 +36,9 @@ pub struct Assertion {
     pub format: Option<String>,
     /// Where the `Assertion` element starts and ends in the document.
     pub span: (usize, usize),
-}
-
-/// One element found by the scan: where its start tag and its whole extent
-/// lie in the text scanned.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Span {
-    /// The `<` of its start tag.
-    start: usize,
-    /// Just past its qualified name.
-    name_end: usize,
-    /// The `>` of its start tag.
-    tag_end: usize,
-    /// Just past its end tag, or its start tag where it is empty.
-    end: usize,
-}
-
-impl Span {
-    fn empty(self, xml: &str) -> bool {
-        xml[..self.tag_end].ends_with('/')
-    }
-
-    fn local(self, xml: &str) -> &str {
-        let qualified = &xml[self.start + 1..self.name_end];
-        qualified.rsplit(':').next().unwrap_or(qualified)
-    }
+    /// Each `Attribute` of the assertion's own attribute statements: its
+    /// `Name` and its first `AttributeValue`, in order.
+    pub attributes: Vec<(String, Option<String>)>,
 }
 
 impl Assertion {
@@ -64,226 +48,207 @@ impl Assertion {
     ///
     /// # Errors
     ///
-    /// Where the assertion is encrypted, unterminated, or names no issuer or
-    /// no subject.
+    /// Where the document is not XML, the assertion is encrypted, or it
+    /// names no issuer or no subject.
     pub fn scan(xml: &str) -> Result<Option<Self>, IdentifyError> {
-        let Some((start, name_end)) = find_element(xml, "Assertion", 0) else {
-            return if find_element(xml, "EncryptedAssertion", 0).is_some() {
-                Err(IdentifyError::new(
-                    "the SAML assertion is encrypted and this gate cannot read it",
-                ))
-            } else {
-                Ok(None)
+        let mut reader = Reader::document(xml);
+        let mut encrypted = false;
+        let (start, tag) = loop {
+            // Until the assertion, only the elements matter.
+            let Some(piece) = reader.read_tag().map_err(not_xml)? else {
+                return if encrypted {
+                    Err(IdentifyError::new(
+                        "the SAML assertion is encrypted and this gate cannot read it",
+                    ))
+                } else {
+                    Ok(None)
+                };
             };
+            if let Event::Start(tag) = piece.event {
+                match tag.local() {
+                    "Assertion" => break (piece.span, tag),
+                    "EncryptedAssertion" => encrypted = true,
+                    _ => {}
+                }
+            }
         };
-        let assertion = span_at(xml, start, name_end).ok_or_else(|| {
-            IdentifyError::new("the SAML assertion is not closed: no </Assertion>")
-        })?;
-        let own = children(xml, assertion);
-
-        let issuer = child(xml, &own, "Issuer")
-            .map(|issuer| element_text(xml, issuer))
-            .transpose()?
-            .flatten()
-            .ok_or_else(|| IdentifyError::new("the SAML assertion names no Issuer"))?;
-        let name_id = child(xml, &own, "Subject")
-            .and_then(|subject| child(xml, &children(xml, subject), "NameID"))
-            .ok_or_else(|| IdentifyError::new("the SAML assertion names no subject: no NameID"))?;
-        let format = attribute(&xml[name_id.name_end..name_id.tag_end], "Format")
-            .as_deref()
-            .map(codec::xml::unescape)
-            .transpose()?;
-        let name_id = element_text(xml, name_id)?
-            .ok_or_else(|| IdentifyError::new("the SAML assertion names no subject: no NameID"))?;
-
+        let mut read = Reading::default();
+        let end = if tag.empty() {
+            start.end
+        } else {
+            loop {
+                let piece = reader
+                    .read()
+                    .map_err(not_xml)?
+                    .ok_or_else(|| IdentifyError::new("the SAML assertion is not closed"))?;
+                match piece.event {
+                    Event::End(_) if read.open.is_empty() => break piece.span.end,
+                    other => read.take(other)?,
+                }
+            }
+        };
+        let no_subject = || IdentifyError::new("the SAML assertion names no subject: no NameID");
         Ok(Some(Self {
-            issuer,
-            name_id,
-            format,
-            span: (assertion.start, assertion.end),
+            issuer: read
+                .issuer
+                .ok_or_else(|| IdentifyError::new("the SAML assertion names no Issuer"))?,
+            name_id: read.name_id.ok_or_else(no_subject)?,
+            format: read.format,
+            span: (start.start, end),
+            attributes: read.attributes,
         }))
     }
 
     /// The first `AttributeValue` of the first `Attribute` whose `Name`
-    /// `named` accepts, among the assertion's own attribute statements, in
-    /// the assertion this was scanned from; `xml` is that same document.
-    ///
-    /// # Errors
-    ///
-    /// A name or value holds an entity XML does not define.
-    pub fn attribute_value(
-        &self,
-        xml: &str,
-        named: impl Fn(&str) -> bool,
-    ) -> Result<Option<String>, IdentifyError> {
-        let Some(body) = xml.get(self.span.0..self.span.1) else {
-            return Ok(None);
-        };
-        let Some((start, name_end)) = find_element(body, "Assertion", 0) else {
-            return Ok(None);
-        };
-        let Some(assertion) = span_at(body, start, name_end) else {
-            return Ok(None);
-        };
-        for statement in children(body, assertion)
-            .into_iter()
-            .filter(|child| child.local(body) == "AttributeStatement")
-        {
-            for attribute_span in children(body, statement)
-                .into_iter()
-                .filter(|child| child.local(body) == "Attribute")
-            {
-                let name = attribute(
-                    &body[attribute_span.name_end..attribute_span.tag_end],
-                    "Name",
-                )
-                .as_deref()
-                .map(codec::xml::unescape)
-                .transpose()?;
-                if name.as_deref().is_some_and(&named) {
-                    return child(body, &children(body, attribute_span), "AttributeValue")
-                        .map(|value| element_text(body, value))
-                        .transpose()
-                        .map(Option::flatten);
+    /// `named` accepts, among the assertion's own attribute statements.
+    #[must_use]
+    pub fn attribute_value(&self, named: impl Fn(&str) -> bool) -> Option<&str> {
+        self.attributes
+            .iter()
+            .find(|(name, _)| named(name))
+            .and_then(|(_, value)| value.as_deref())
+    }
+}
+
+fn not_xml(refused: Malformed) -> IdentifyError {
+    IdentifyError::new(format!("the SAML is not XML: {refused}"))
+}
+
+/// What an element open inside the assertion is to this reading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Role {
+    Issuer,
+    Subject,
+    NameId,
+    Statement,
+    Attribute,
+    Value,
+    Other,
+}
+
+/// The first `Issuer` was met.
+const ISSUER: u8 = 1;
+/// The first `Subject` was met.
+const SUBJECT: u8 = 2;
+/// The first `Subject`'s first `NameID` was met.
+const NAME_ID: u8 = 4;
+
+/// The assertion's names, kept as its pieces pass.
+#[derive(Default)]
+struct Reading {
+    /// The elements open inside the assertion, by what each is.
+    open: Vec<Role>,
+    /// Which of the first `Issuer`, the first `Subject` and its first
+    /// `NameID` were met ([`ISSUER`], [`SUBJECT`], [`NAME_ID`]).
+    met: u8,
+    issuer: Option<String>,
+    name_id: Option<String>,
+    format: Option<String>,
+    attributes: Vec<(String, Option<String>)>,
+    /// Whether the open `Attribute` has had its first value.
+    valued: bool,
+    /// The text of the element whose text is kept, so far.
+    text: String,
+}
+
+impl Reading {
+    fn take(&mut self, event: Event<'_>) -> Result<(), IdentifyError> {
+        match event {
+            Event::Start(tag) => {
+                let role = self.role(&tag)?;
+                self.open.push(role);
+                if self.keeping() {
+                    self.text.clear();
+                }
+                if tag.empty() {
+                    self.close();
                 }
             }
-        }
-        Ok(None)
-    }
-}
-
-/// The first of `children` with this local name.
-fn child(xml: &str, children: &[Span], local: &str) -> Option<Span> {
-    children
-        .iter()
-        .copied()
-        .find(|child| child.local(xml) == local)
-}
-
-/// The element whose start tag opens at `start`, its extent found by
-/// following the nesting to its own end tag.
-fn span_at(xml: &str, start: usize, name_end: usize) -> Option<Span> {
-    let tag_end = xml[name_end..].find('>').map(|at| at + name_end)?;
-    let mut span = Span {
-        start,
-        name_end,
-        tag_end,
-        end: tag_end + 1,
-    };
-    if span.empty(xml) {
-        return Some(span);
-    }
-    let mut depth = 0_usize;
-    let mut at = tag_end + 1;
-    while let Some(offset) = xml[at..].find('<') {
-        let open = at + offset;
-        let close = xml[open..].find('>').map(|end| end + open)?;
-        let tag = &xml[open..=close];
-        at = close + 1;
-        if tag.starts_with("<!--") || tag.starts_with("<?") || tag.starts_with("<!") {
-            continue;
-        }
-        if tag.starts_with("</") {
-            if depth == 0 {
-                span.end = at;
-                return Some(span);
+            Event::End(_) => self.close(),
+            Event::Text(text) if self.keeping() => {
+                self.text.push_str(&codec::xml::line_ends(text));
             }
-            depth -= 1;
-        } else if !tag.ends_with("/>") {
-            depth += 1;
+            Event::CData(data) if self.keeping() => self.text.push_str(data),
+            Event::Reference(name) if self.keeping() => {
+                self.text.push(codec::xml::entity(name)?);
+            }
+            _ => {}
         }
+        Ok(())
     }
-    None
-}
 
-/// The elements directly inside `parent`, in order.
-fn children(xml: &str, parent: Span) -> Vec<Span> {
-    let mut found = Vec::new();
-    if parent.empty(xml) {
-        return found;
+    fn keeping(&self) -> bool {
+        matches!(
+            self.open.last(),
+            Some(Role::Issuer | Role::NameId | Role::Value)
+        )
     }
-    let mut at = parent.tag_end + 1;
-    while let Some(offset) = xml[at..parent.end].find('<') {
-        let open = at + offset;
-        let rest = &xml[open..parent.end];
-        if rest.starts_with("</") {
-            break;
-        }
-        if rest.starts_with("<!") || rest.starts_with("<?") {
-            at = rest.find('>').map_or(parent.end, |end| open + end + 1);
-            continue;
-        }
-        let name_end = open
-            + 1
-            + rest[1..]
-                .find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
-                .unwrap_or(rest.len() - 1);
-        let Some(span) = span_at(xml, open, name_end).filter(|span| span.end <= parent.end) else {
-            break;
+
+    /// What the element `tag` opens is, where it stands.
+    fn role(&mut self, tag: &Tag<'_>) -> Result<Role, IdentifyError> {
+        Ok(match (self.open.last(), tag.local()) {
+            (None, "Issuer") if self.met & ISSUER == 0 => {
+                self.met |= ISSUER;
+                Role::Issuer
+            }
+            (None, "Subject") if self.met & SUBJECT == 0 => {
+                self.met |= SUBJECT;
+                Role::Subject
+            }
+            (None, "AttributeStatement") => Role::Statement,
+            (Some(Role::Subject), "NameID") if self.met & NAME_ID == 0 => {
+                self.met |= NAME_ID;
+                self.format = attribute(tag, "Format")?;
+                Role::NameId
+            }
+            (Some(Role::Statement), "Attribute") => match attribute(tag, "Name")? {
+                Some(name) => {
+                    self.attributes.push((name, None));
+                    self.valued = false;
+                    Role::Attribute
+                }
+                None => Role::Other,
+            },
+            (Some(Role::Attribute), "AttributeValue") if !self.valued => {
+                self.valued = true;
+                Role::Value
+            }
+            _ => Role::Other,
+        })
+    }
+
+    fn close(&mut self) {
+        let kept = || {
+            let text = self.text.trim();
+            (!text.is_empty()).then(|| text.to_string())
         };
-        found.push(span);
-        at = span.end;
-    }
-    found
-}
-
-/// The text between the start tag's `>` and the next `<`, trimmed and
-/// unescaped. An empty element (`<x/>`) has none.
-fn element_text(xml: &str, span: Span) -> Result<Option<String>, IdentifyError> {
-    if span.empty(xml) {
-        return Ok(None);
-    }
-    let content = &xml[span.tag_end + 1..span.end];
-    let Some(close) = content.find('<') else {
-        return Ok(None);
-    };
-    let text = content[..close].trim();
-    Ok((!text.is_empty())
-        .then(|| codec::xml::unescape(text))
-        .transpose()?)
-}
-
-/// The start of the first element whose local name is `local_name`, at or
-/// after `from`: the index of its `<` and the index just past its qualified
-/// name.
-fn find_element(xml: &str, local_name: &str, from: usize) -> Option<(usize, usize)> {
-    let bytes = xml.as_bytes();
-    let mut at = from;
-    while let Some(offset) = xml[at..].find('<') {
-        let start = at + offset;
-        let name_start = start + 1;
-        let name_end = name_start
-            + bytes[name_start..]
-                .iter()
-                .position(|byte| byte.is_ascii_whitespace() || *byte == b'>' || *byte == b'/')
-                .unwrap_or(bytes.len() - name_start);
-        let qualified = &xml[name_start..name_end];
-        let local = qualified.rsplit(':').next().unwrap_or(qualified);
-        if local == local_name && !qualified.starts_with(['?', '!']) {
-            return Some((start, name_end));
-        }
-        at = name_end.max(start + 1);
-    }
-    None
-}
-
-/// One attribute's value from the text between an element's name and `>`.
-fn attribute(attributes: &str, name: &str) -> Option<String> {
-    let mut rest = attributes;
-    while let Some(at) = rest.find(name) {
-        let after = rest[at + name.len()..].trim_start();
-        let preceded_by_space = at == 0 || rest.as_bytes()[at - 1].is_ascii_whitespace();
-        if preceded_by_space && let Some(value) = after.strip_prefix('=') {
-            let value = value.trim_start();
-            let quote = value.chars().next()?;
-            if quote == '"' || quote == '\'' {
-                let inner = &value[1..];
-                return inner.find(quote).map(|end| inner[..end].to_string());
+        match self.open.last() {
+            Some(Role::Issuer) => self.issuer = kept(),
+            Some(Role::NameId) => self.name_id = kept(),
+            Some(Role::Value) => {
+                let value = kept();
+                if let Some((_, slot)) = self.attributes.last_mut() {
+                    *slot = value;
+                }
             }
+            _ => {}
         }
-        rest = &rest[at + name.len()..];
+        self.open.pop();
     }
-    None
+}
+
+/// The value of the attribute `name` in no namespace on `tag`, as XML
+/// reads it.
+fn attribute(tag: &Tag<'_>, name: &str) -> Result<Option<String>, IdentifyError> {
+    for written in tag.attributes() {
+        let written = written.map_err(not_xml)?;
+        if written.name == name {
+            return Ok(Some(
+                codec::xml::attribute_value(written.value)?.into_owned(),
+            ));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -327,7 +292,8 @@ mod tests {
         // unsigned Signature comes first in the text, and is not the
         // assertion's own.
         let xml = concat!(
-            "<saml:Assertion ID=\"a1\"><saml:Issuer>idp</saml:Issuer>",
+            "<saml:Assertion xmlns:saml=\"urn:s\" xmlns:ds=\"urn:d\" ID=\"a1\">",
+            "<saml:Issuer>idp</saml:Issuer>",
             "<ds:Signature><ds:Object><saml:Subject><saml:NameID>admin</saml:NameID>",
             "</saml:Subject></ds:Object></ds:Signature>",
             "<saml:Subject><saml:NameID>party-x</saml:NameID></saml:Subject>",
@@ -355,7 +321,7 @@ mod tests {
     #[test]
     fn an_attribute_is_read_by_its_name_and_not_by_the_one_beside_it() {
         let xml = concat!(
-            "<saml:Assertion><saml:Issuer>idp</saml:Issuer>",
+            "<saml:Assertion xmlns:saml=\"urn:s\"><saml:Issuer>idp</saml:Issuer>",
             "<saml:Subject><saml:NameID>u</saml:NameID></saml:Subject>",
             "<saml:AttributeStatement>",
             r#"<saml:Attribute Name="urn:empty" NameFormat="urn:x"></saml:Attribute>"#,
@@ -366,19 +332,11 @@ mod tests {
         let assertion = Assertion::scan(xml).expect("read").expect("an assertion");
 
         assert_eq!(
-            assertion
-                .attribute_value(xml, |name| name == "urn:role")
-                .expect("read")
-                .as_deref(),
+            assertion.attribute_value(|name| name == "urn:role"),
             Some("buyer")
         );
-        let value = |wanted: &str| {
-            assertion
-                .attribute_value(xml, |name| name == wanted)
-                .expect("read")
-        };
-        assert_eq!(value("urn:empty"), None);
-        assert_eq!(value("urn:absent"), None);
+        assert_eq!(assertion.attribute_value(|name| name == "urn:empty"), None);
+        assert_eq!(assertion.attribute_value(|name| name == "urn:absent"), None);
     }
 
     #[test]
@@ -391,8 +349,8 @@ mod tests {
 
     #[test]
     fn an_encrypted_assertion_is_recognized_and_refused_by_name() {
-        let xml =
-            "<samlp:Response><saml:EncryptedAssertion>x</saml:EncryptedAssertion></samlp:Response>";
+        let xml = "<samlp:Response xmlns:samlp=\"urn:p\" xmlns:saml=\"urn:s\">\
+                   <saml:EncryptedAssertion>x</saml:EncryptedAssertion></samlp:Response>";
 
         let failure = Assertion::scan(xml).expect_err("encrypted");
 
@@ -401,10 +359,18 @@ mod tests {
 
     #[test]
     fn an_assertion_without_a_name_id_is_an_error_naming_the_element() {
-        let xml = "<saml:Assertion><saml:Issuer>idp</saml:Issuer><saml:Subject/></saml:Assertion>";
+        let xml = "<saml:Assertion xmlns:saml=\"urn:s\"><saml:Issuer>idp</saml:Issuer>\
+                   <saml:Subject/></saml:Assertion>";
 
         let failure = Assertion::scan(xml).expect_err("no NameID");
 
         assert!(failure.message.contains("NameID"), "{failure}");
+    }
+
+    #[test]
+    fn text_that_is_not_xml_is_refused_saying_so() {
+        let failure = Assertion::scan("<Assertion><Issuer>").expect_err("not XML");
+
+        assert!(failure.message.contains("not XML"), "{failure}");
     }
 }

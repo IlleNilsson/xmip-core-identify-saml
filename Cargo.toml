@@ -20,7 +20,7 @@ path = "src/lib.rs"
 identify = { package = "xmip-core-identify", git = "https://github.com/IlleNilsson/xmip-core-identify", branch = "main" }
 xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core", branch = "main" }
 message = { package = "xmip-core-message", git = "https://github.com/IlleNilsson/xmip-core-message", branch = "main" }
-# XML character data, unescaped as every reader in the estate does.
+# The assertion read by the estate's one XML reader (`codec::xml::tree`).
 codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNilsson/xmip-core-library-codec", branch = "main" }
 # The names the transport writes on the arrival (context::property), and
 # the context a Message is built over.

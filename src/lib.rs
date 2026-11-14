@@ -19,7 +19,7 @@
 //! response as standard base64 in the `SAMLResponse` form field, which the
 //! HTTP transport promotes onto the arrival; on the message layer the
 //! content is the XML itself — a SOAP-borne assertion, a WS-Security SAML
-//! token — and the first section is scanned for an `Assertion`.
+//! token — and the first section is read for an `Assertion`.
 //!
 //! What this reads and writes:
 //!
@@ -77,27 +77,18 @@ impl Saml {
         }
     }
 
-    fn present(
-        &self,
-        assertion: &Assertion,
-        xml: &str,
-        proof: String,
-    ) -> Result<Presented, IdentifyError> {
+    fn present(&self, assertion: &Assertion, proof: String) -> Presented {
         let mut claim = Presented::passed(TransportIdentifier::mechanism(self), &assertion.name_id)
             .with_evidence(ISSUER, &assertion.issuer);
         if let Some(format) = &assertion.format {
             claim = claim.with_evidence(NAME_ID_FORMAT, format);
         }
-        let upn = assertion.attribute_value(xml, saml::is_upn_attribute)?;
-        let name = saml::user_principal(
-            &assertion.name_id,
-            assertion.format.as_deref(),
-            upn.as_deref(),
-        );
+        let upn = assertion.attribute_value(saml::is_upn_attribute);
+        let name = saml::user_principal(&assertion.name_id, assertion.format.as_deref(), upn);
         if let Some(name) = name {
             claim = claim.with_evidence(evidence::PRINCIPAL_USER, name.to_string());
         }
-        Ok(claim.with_proof(evidence::SAML_ASSERTION, proof))
+        claim.with_proof(evidence::SAML_ASSERTION, proof)
     }
 }
 
@@ -121,7 +112,7 @@ impl TransportIdentifier for Saml {
         let Some(assertion) = Assertion::scan(&xml)? else {
             return Err(IdentifyError::new("the SAML response carries no Assertion"));
         };
-        self.present(&assertion, &xml, posted.to_string()).map(Some)
+        Ok(Some(self.present(&assertion, posted.to_string())))
     }
 }
 
@@ -145,7 +136,7 @@ impl MessageIdentifier for Saml {
             return Ok(None);
         };
         let proof = codec::base64::encode(&xml.as_bytes()[assertion.span.0..assertion.span.1]);
-        self.present(&assertion, xml, proof).map(Some)
+        Ok(Some(self.present(&assertion, proof)))
     }
 }
 
@@ -224,7 +215,8 @@ mod tests {
     /// An assertion with this `NameID` element and these attribute statements.
     fn presented(name_id: &str, statements: &str) -> Presented {
         let xml = format!(
-            "<saml:Assertion><saml:Issuer>https://idp.example</saml:Issuer>\
+            "<saml:Assertion xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\">\
+             <saml:Issuer>https://idp.example</saml:Issuer>\
              <saml:Subject>{name_id}</saml:Subject>{statements}</saml:Assertion>"
         );
         let properties = posted(&xml);
@@ -328,7 +320,10 @@ mod tests {
 
     #[test]
     fn a_response_without_an_assertion_is_an_error_and_not_an_absence() {
-        let properties = posted("<samlp:Response><samlp:Status/></samlp:Response>");
+        let properties = posted(
+            "<samlp:Response xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\">\
+             <samlp:Status/></samlp:Response>",
+        );
         let arrival = StreamArrival::new(Arriving::Pushed, "https://x/acs", &properties);
 
         let failure =
