@@ -8,11 +8,6 @@ nesting: the `Issuer`, the `Subject`'s `NameID` and the attribute statements it
 reads are the assertion's own children, the same ones the second gate reads, so a
 `Subject` planted in the unsigned `Signature` is never the claim.
 
-## Toolchain
-
-`rust-toolchain.toml` pins the toolchain for the whole estate. Do not change it
-here.
-
 ## Verification
 
 The included workflow is manual-only and calls the versioned shared workflow at
